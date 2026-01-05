@@ -16,11 +16,26 @@ KEYWORDS = [
 ]
 
 MERCHANTS = [
-    "Officeworks", "JB Hi-Fi", "The Good Guys", "Apple",
+    "Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "Harvey Norman",
     "Amazon", "Woolworths", "Coles", "IKEA"
 ]
 
-PRIORITY_MERCHANTS = ["Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "IKEA"]
+PRIORITY_MERCHANTS = ["Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "Harvey Norman", "IKEA"]
+
+PHYSICAL_RETAILERS = {
+    "Officeworks": ["JB Hi-Fi", "The Good Guys", "Harvey Norman"],
+    "JB Hi-Fi": ["Officeworks", "The Good Guys", "Harvey Norman"],
+    "The Good Guys": ["Officeworks", "JB Hi-Fi", "Harvey Norman"],
+    "Apple": ["Officeworks", "JB Hi-Fi", "The Good Guys", "Harvey Norman"],
+    "Harvey Norman": ["Officeworks", "JB Hi-Fi", "The Good Guys"],
+}
+
+STOCK_KEYWORDS = [
+    "in stock", "click and collect", "c&c", "click & collect",
+    "pick up", "pickup", "in-store", "in store", "store stock"
+]
+
+LATEST_KNOWN_GENERATION = 4  # M4 as of Jan 2026
 
 TIMEOUT = 20
 UA = "Mozilla/5.0 DealAgent/1.0"
@@ -50,6 +65,13 @@ def detect_cashback(text):
         found.append("Cashback")
     return found
 
+def generate_cashback_note(portals):
+    """Generate conservative cashback warning note."""
+    if not portals:
+        return None
+    portal_str = ", ".join(portals)
+    return f"⚠️ {portal_str} typically excludes gift card purchases. Verify portal T&Cs before assuming cashback applies."
+
 def extract_x(text):
     m = re.search(r"(\d{1,3})\s*x\b", (text or "").lower())
     return int(m.group(1)) if m else None
@@ -64,6 +86,144 @@ def stack_hint(title):
     if any(k in t for k in ["officeworks", "jb hi-fi", "jbhifi"]):
         hints.append("Check cashback portal T&Cs for gift card payments.")
     return " ".join(hints)
+
+def detect_apple_chip(text):
+    """Detect Apple Silicon chip from text."""
+    pattern = r'\bM(\d+)\s*(Pro|Max|Ultra)?\b'
+    match = re.search(pattern, text or "", re.IGNORECASE)
+    
+    if not match:
+        return {"chip": None, "generation": None, "tier": "unknown"}
+    
+    generation = int(match.group(1))
+    tier_raw = match.group(2)
+    tier = tier_raw.lower() if tier_raw else "base"
+    
+    chip = f"M{generation}"
+    if tier_raw:
+        chip += f" {tier_raw.title()}"
+    
+    return {"chip": chip, "generation": generation, "tier": tier}
+
+def detect_physical_retailers(text):
+    """Detect physical retailers that support price match/beat."""
+    t = (text or "").lower()
+    found = []
+    for retailer in PHYSICAL_RETAILERS.keys():
+        if retailer.lower() in t:
+            found.append(retailer)
+    return found
+
+def detect_stock_signal(text):
+    """Check if text contains stock/C&C availability signals."""
+    t = (text or "").lower()
+    return any(kw in t for kw in STOCK_KEYWORDS)
+
+def calculate_arbitrage(item):
+    """Calculate arbitrage opportunity: eligible, targets, confidence."""
+    title = item.get("title", "")
+    physical = detect_physical_retailers(title)
+    has_stock = detect_stock_signal(title)
+    chip_info = item.get("chip_info", {})
+    
+    # Not eligible if no physical retailer mentioned
+    if not physical:
+        return {"eligible": False, "targets": [], "confidence": "none"}
+    
+    # Build list of potential arbitrage targets
+    targets = []
+    for retailer in physical:
+        if retailer in PHYSICAL_RETAILERS:
+            targets.extend(PHYSICAL_RETAILERS[retailer])
+    
+    # Remove duplicates
+    targets = list(set(targets))
+    
+    # Determine confidence level
+    confidence = "none"
+    if targets:
+        # High confidence: physical retailer + stock signal + (Apple chip OR priority merchant)
+        if has_stock and (chip_info.get("chip") or any(m in PRIORITY_MERCHANTS for m in physical)):
+            confidence = "high"
+        # Medium confidence: physical retailer + stock signal
+        elif has_stock:
+            confidence = "medium"
+        # Low confidence: physical retailer mentioned but no stock signal
+        else:
+            confidence = "low"
+    
+    return {
+        "eligible": len(targets) > 0,
+        "targets": targets,
+        "confidence": confidence
+    }
+
+def detect_gift_card_type(text):
+    """Detect gift card type: apple, ultimate, tcn, or generic."""
+    t = (text or "").lower()
+    if "apple gift" in t or "apple giftcard" in t:
+        return "apple"
+    if "ultimate" in t:
+        return "ultimate"
+    if "tcn" in t:
+        return "tcn"
+    if "gift card" in t or "giftcard" in t:
+        return "generic"
+    return None
+
+def generate_stack_recipe(item):
+    """Generate 3-5 step recipe for stacking this deal."""
+    title = item.get("title", "")
+    t = title.lower()
+    gc_type = detect_gift_card_type(title)
+    x = extract_x(title)
+    merchants = item.get("merchants", [])
+    arbitrage = item.get("arbitrage", {})
+    chip_info = item.get("chip_info", {})
+    
+    steps = []
+    
+    # Step 1: Points promo
+    if x:
+        if x >= 20:
+            steps.append(f"Activate {x}x points in your loyalty account before purchase.")
+        else:
+            steps.append(f"Ensure {x}x points promo is active in your account.")
+    
+    # Step 2: Gift card purchase
+    if gc_type == "ultimate":
+        steps.append("Buy Ultimate gift cards at promoted merchant (front-load points return).")
+        steps.append("Convert Ultimate cards online to JB Hi-Fi/Officeworks denominations (check 1-card-online.com.au limits).")
+    elif gc_type == "tcn":
+        steps.append("Buy TCN gift cards to use at category merchants (check specific merchant list).")
+    elif gc_type == "apple":
+        steps.append("Buy Apple gift cards at promoted merchant (front-load points return).")
+        steps.append("Use Apple gift cards for Apple Store purchases (online or in-store, check online gift card limits).")
+    elif gc_type == "generic":
+        steps.append("Buy gift cards at promoted merchant (front-load points return).")
+        if merchants:
+            steps.append(f"Use gift cards at {merchants[0]} (check online gift card limits).")
+    
+    # Step 3: Arbitrage opportunity
+    if arbitrage.get("eligible") and arbitrage.get("confidence") in ["high", "medium"]:
+        targets = arbitrage.get("targets", [])
+        if targets and chip_info.get("chip"):
+            steps.append(f"Compare prices at {', '.join(targets[:2])} for price match/beat opportunities (verify current policies).")
+        elif targets:
+            steps.append(f"Check {', '.join(targets[:2])} for competitive pricing (price match may be available).")
+    
+    # Step 4: Cashback (optional)
+    if item.get("cashback"):
+        cashback_sites = ", ".join(item["cashback"][:2])
+        steps.append(f"Optional: Use {cashback_sites} if portal allows gift-card/account-balance payments (check T&Cs).")
+    
+    # Step 5: Generic caution
+    if gc_type in ["ultimate", "apple"] or (gc_type and any(m in merchants for m in ["JB Hi-Fi", "Officeworks", "Apple"])):
+        if "check online gift card limits" not in " ".join(steps):
+            steps.append("Check online gift card limits at redemption merchant.")
+    
+    # Return max 5 steps
+    return steps[:5]
 
 def why_stack_works(it):
     """
@@ -94,7 +254,31 @@ def why_stack_works(it):
         reasons.append("Target merchant accepts gift cards (online limits may apply).")
 
     if it.get("cashback"):
-        reasons.append("Cashback mentioned, but gift-card payments are often excluded → treat as upside, not core.")
+        reasons.append("Cashback portals often exclude gift card purchases—verify T&Cs before relying on cashback.")
+    
+    # Apple chip forward-compatibility for price matching
+    chip_info = it.get("chip_info", {})
+    if chip_info.get("chip") and chip_info.get("generation", 0) >= LATEST_KNOWN_GENERATION:
+        reasons.append("Apple silicon generations are forward-compatible for price matching when model/SKU aligns.")
+    
+    # Apple chip with stock signal - specific price match hint
+    if chip_info.get("chip"):
+        # Check for stock/C&C signals in title
+        title_lower = (it.get("title", "")).lower()
+        has_stock = any(kw in title_lower for kw in STOCK_KEYWORDS)
+        if has_stock:
+            reasons.append("Consider Harvey Norman / JB Hi-Fi / Officeworks price match/beat where policy allows.")
+    
+    # Physical retailer arbitrage opportunity
+    arbitrage = it.get("arbitrage", {})
+    if arbitrage.get("eligible") and arbitrage.get("confidence") in ["high", "medium"]:
+        targets = arbitrage.get("targets", [])
+        if targets:
+            target_str = ", ".join(targets[:2])  # Show max 2 targets
+            if arbitrage["confidence"] == "high":
+                reasons.append(f"Physical stock signals suggest possible price match arbitrage at {target_str} (verify current policies).")
+            else:
+                reasons.append(f"Physical retailer deal may enable price comparison with {target_str} (check stock and policies).")
 
     return " ".join(reasons)
 
@@ -113,9 +297,21 @@ def score_item(it):
     if any(m in it.get("merchants", []) for m in PRIORITY_MERCHANTS):
         score += 2
 
+    # Cashback: reduced weight, never outweighs points/gift cards
     if it.get("cashback"):
-        score += 2
+        score += 1  # Reduced from 2 to 1
         if any(c in ["ShopBack", "TopCashback"] for c in it["cashback"]):
+            score += 0.5  # Reduced from 1 to 0.5
+    
+    # Arbitrage opportunity scoring
+    arbitrage = it.get("arbitrage", {})
+    if arbitrage.get("eligible"):
+        confidence = arbitrage.get("confidence", "none")
+        if confidence == "high":
+            score += 4
+        elif confidence == "medium":
+            score += 2
+        elif confidence == "low":
             score += 1
 
     if "win " in t or "competition" in t:
@@ -169,8 +365,12 @@ def build_reports():
     for it in raw:
         it["merchants"] = detect_merchants(it.get("title", ""))
         it["cashback"] = detect_cashback(it.get("title", ""))
+        it["cashback_note"] = generate_cashback_note(it["cashback"])
         it["hint"] = stack_hint(it.get("title", ""))
+        it["chip_info"] = detect_apple_chip(it.get("title", ""))
+        it["arbitrage"] = calculate_arbitrage(it)
         it["why"] = why_stack_works(it)
+        it["recipe"] = generate_stack_recipe(it)
         it["score"] = score_item(it)
         enriched.append(it)
 
@@ -185,8 +385,14 @@ def build_reports():
         lines.append(f"   {x['link']}")
         if x.get("hint"):
             lines.append(f"   Hint: {x['hint']}")
+        if x.get("cashback_note"):
+            lines.append(f"   {x['cashback_note']}")
         if x.get("why"):
             lines.append(f"   Why this stack works: {x['why']}")
+        if x.get("recipe"):
+            lines.append(f"   📋 Stack Recipe:")
+            for step_num, step in enumerate(x["recipe"], 1):
+                lines.append(f"      {step_num}. {step}")
         lines.append("")
 
     plain = "\n".join(lines)
@@ -200,7 +406,22 @@ def build_reports():
         merchants = ", ".join(x.get("merchants", []))
         cashback = ", ".join(x.get("cashback", []))
         hint = x.get("hint", "")
+        cashback_note = x.get("cashback_note", "")
         why = x.get("why", "")
+        recipe = x.get("recipe", [])
+        
+        # Build recipe HTML
+        recipe_html = ""
+        if recipe:
+            recipe_steps = "".join([f"<li style='margin:3px 0;'>{esc(step)}</li>" for step in recipe])
+            recipe_html = f"""
+            <div style='margin-top:8px;padding:8px;background:#f0f8ff;border-left:3px solid #4a90e2;border-radius:4px;'>
+              <div style='font-weight:700;color:#2c5aa0;font-size:12px;margin-bottom:4px;'>📋 Stack Recipe:</div>
+              <ol style='margin:4px 0 0 18px;padding:0;color:#333;font-size:11px;line-height:16px;'>
+                {recipe_steps}
+              </ol>
+            </div>
+            """
 
         rows += f"""
         <tr>
@@ -215,7 +436,9 @@ def build_reports():
               {f"<br>Cashback: {esc(cashback)}" if cashback else ""}
             </div>
             {f"<div style='margin-top:6px;color:#333;font-size:12px;'><b>Hint:</b> {esc(hint)}</div>" if hint else ""}
+            {f"<div style='margin-top:6px;padding:6px 8px;background:#fff3cd;border-left:3px solid #ffc107;border-radius:3px;color:#856404;font-size:11px;'>{esc(cashback_note)}</div>" if cashback_note else ""}
             {f"<div style='margin-top:6px;color:#1f6f43;font-size:12px;'><b>Why this stack works:</b> {esc(why)}</div>" if why else ""}
+            {recipe_html}
           </td>
         </tr>
         """

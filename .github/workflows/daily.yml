@@ -2,7 +2,7 @@ name: Daily Deal Reports
 
 on:
   schedule:
-    - cron: "0 21 * * *"   # runs daily (UTC)
+    - cron: "0 22 * * *"   # 8am AEST (UTC+10)
   workflow_dispatch: {}
 
 jobs:
