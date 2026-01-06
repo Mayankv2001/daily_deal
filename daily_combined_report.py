@@ -331,40 +331,116 @@ def fetch_url(url):
     r.raise_for_status()
     return r.text
 
-def fetch_freepoints():
-    soup = BeautifulSoup(fetch_url("https://freepoints.com.au/"), "lxml")
-    out = []
-    for a in soup.select("a[href^='https://freepoints.com.au/']"):
-        t = norm(a.get_text(" ", strip=True))
-        if t and contains_keywords(t):
-            out.append({"source": "FreePoints", "title": t, "link": a["href"]})
-    return out[:15]
+# ---------- FETCHERS ----------
+def fetch_ozbargain_trending(limit=10):
+    """Fetch trending deals from OzBargain /hot page."""
+    # Try /hot first, fallback to front page
+    urls = ["https://www.ozbargain.com.au/hot", "https://www.ozbargain.com.au/"]
+    html = None
+    for u in urls:
+        try:
+            html = fetch_url(u)
+            break
+        except Exception:
+            continue
+    if not html:
+        return []
 
-def fetch_gcdb():
-    soup = BeautifulSoup(fetch_url("https://gcdb.com.au/"), "lxml")
-    out = []
-    for a in soup.select("a[href^='https://gcdb.com.au/']"):
-        t = norm(a.get_text(" ", strip=True))
-        if t and contains_keywords(t):
-            out.append({"source": "GCDB", "title": t, "link": a["href"]})
-    return out[:15]
-
-def fetch_ozb():
-    soup = BeautifulSoup(fetch_url("https://www.ozbargain.com.au/"), "lxml")
-    out = []
+    soup = BeautifulSoup(html, "lxml")
+    deals = []
     for a in soup.select("a[href^='/node/']"):
-        t = norm(a.get_text(" ", strip=True))
-        if t and contains_keywords(t):
-            out.append({
-                "source": "OzBargain",
-                "title": t,
-                "link": "https://www.ozbargain.com.au" + a["href"]
-            })
-    return out[:20]
+        title = norm(a.get_text(" ", strip=True))
+        if not title or len(title) < 10:
+            continue
+        link = "https://www.ozbargain.com.au" + a["href"]
+        deals.append({"title": title, "link": link})
 
-def fetch_costco():
-    """Fetch Costco Hot Buys - checks for Apple products only.
-    Note: Costco uses JavaScript rendering, so we return a manual check reminder."""
+    seen = set()
+    out = []
+    for d in deals:
+        if d["link"] in seen:
+            continue
+        seen.add(d["link"])
+        out.append(d)
+        if len(out) >= limit:
+            break
+    return out
+
+def fetch_freepoints_latest(limit=10):
+    """Fetch latest deals from FreePoints."""
+    html = fetch_url("https://freepoints.com.au/")
+    soup = BeautifulSoup(html, "lxml")
+    items = []
+    for a in soup.select("a"):
+        txt = norm(a.get_text(" ", strip=True))
+        href = a.get("href") or ""
+        if not href.startswith("https://freepoints.com.au/"):
+            continue
+        if ("points" in txt.lower() or "gift card" in txt.lower()) and contains_keywords(txt):
+            items.append({"source": "FreePoints", "title": txt, "link": href})
+
+    seen = set()
+    out = []
+    for it in items:
+        if it["link"] in seen:
+            continue
+        seen.add(it["link"])
+        out.append(it)
+        if len(out) >= limit:
+            break
+    return out
+
+def fetch_gcdb_latest(limit=10):
+    """Fetch latest deals from GCDB."""
+    html = fetch_url("https://gcdb.com.au/")
+    soup = BeautifulSoup(html, "lxml")
+    items = []
+    for a in soup.select("a"):
+        txt = norm(a.get_text(" ", strip=True))
+        href = a.get("href") or ""
+        if not href.startswith("https://gcdb.com.au/"):
+            continue
+        if ("gift card" in txt.lower() or "points" in txt.lower() or "off" in txt.lower()) and contains_keywords(txt):
+            items.append({"source": "GCDB", "title": txt, "link": href})
+
+    seen = set()
+    out = []
+    for it in items:
+        if it["link"] in seen:
+            continue
+        seen.add(it["link"])
+        out.append(it)
+        if len(out) >= limit:
+            break
+    return out
+
+def fetch_ozbargain_frontpage(limit=20):
+    """Fetch deals from OzBargain front page."""
+    html = fetch_url("https://www.ozbargain.com.au/")
+    soup = BeautifulSoup(html, "lxml")
+    items = []
+    for a in soup.select("a[href^='/node/']"):
+        href = a.get("href") or ""
+        title = norm(a.get_text(" ", strip=True))
+        if not title:
+            continue
+        full = "https://www.ozbargain.com.au" + href
+        if contains_keywords(title):
+            items.append({"source": "OzBargain", "title": title, "link": full})
+
+    seen = set()
+    out = []
+    for it in items:
+        if it["link"] in seen:
+            continue
+        seen.add(it["link"])
+        out.append(it)
+        if len(out) >= limit:
+            break
+    return out
+
+def fetch_costco_hotbuys():
+    """Fetch Costco Hot Buys - checks for Apple products only."""
     items = []
     
     # Add manual check reminder
@@ -392,14 +468,37 @@ def fetch_costco():
     
     return items
 
+# ---------- ADDITIONAL HELPER FOR DAILY REPORT ----------
+def calculate_confidence(item):
+    """Calculate arbitrage confidence: HIGH/MEDIUM/LOW (for daily report)."""
+    title = item.get("title", "")
+    chip_info = item.get("chip_info", {})
+    physical = item.get("physical_retailers", [])
+    has_stock = item.get("has_stock_signal", False)
+    
+    # Apple chip detected
+    if chip_info.get("chip"):
+        # High confidence: chip + physical retailer + stock signal
+        if physical and has_stock:
+            return "HIGH"
+        # Low confidence: chip but no physical retailer or stock signal
+        if not physical or not has_stock:
+            return "LOW"
+    
+    # Medium confidence for other deals with merchants
+    if item.get("merchants"):
+        return "MEDIUM"
+    
+    return "LOW"
 
+# ---------- STACK REPORT ----------
 def build_stack_report() -> tuple[str, str]:
     """
     Build Top 5 Stack Report.
     Returns: (plain_text, html)
     """
     today = dt.date.today().isoformat()
-    raw = fetch_freepoints() + fetch_gcdb() + fetch_ozb() + fetch_costco()
+    raw = fetch_freepoints_latest(15) + fetch_gcdb_latest(15) + fetch_ozbargain_frontpage(20) + fetch_costco_hotbuys()
 
     enriched = []
     for it in raw:
@@ -502,17 +601,243 @@ def build_daily_report() -> tuple[str, str]:
     """
     today = dt.datetime.now().strftime("%Y-%m-%d")
     
-    # Placeholder: fetch, enrich, render sections
-    plain = f"Daily Deal Stack Report — {today}\n\n(Daily report placeholder)\n"
+    trending = fetch_ozbargain_trending(10)
+
+    all_items = []
+    all_items += fetch_freepoints_latest(10)
+    all_items += fetch_gcdb_latest(10)
+    all_items += fetch_ozbargain_frontpage(20)
+    all_items += fetch_costco_hotbuys()
+
+    enriched = []
+    for it in all_items:
+        title = it["title"]
+        merch = detect_merchants(title)
+        cashback = detect_cashback(title)
+        hint = stack_hint(title)
+        
+        # Apple chip detection and analysis
+        chip_info = detect_apple_chip(title)
+        physical = detect_physical_retailers(title)
+        has_stock = detect_stock_signal(title)
+        is_apple = chip_info.get("chip") is not None
+        
+        # Build enriched item
+        enriched_item = {
+            **it,
+            "merchants": merch,
+            "cashback": cashback,
+            "cashback_note": generate_cashback_note(cashback),
+            "hint": hint,
+            "chip_info": chip_info,
+            "physical_retailers": physical,
+            "has_stock_signal": has_stock,
+            "is_apple": is_apple,
+        }
+        
+        # Calculate confidence
+        confidence = calculate_confidence(enriched_item)
+        enriched_item["confidence"] = confidence
+        
+        # Enhanced hints for Apple chip deals
+        if is_apple:
+            chip = chip_info.get("chip")
+            tier = chip_info.get("tier")
+            hints_list = [hint] if hint else []
+            
+            if physical and has_stock:
+                hints_list.append(f"💎 HIGH CONFIDENCE: {chip} deal at physical retailer ({', '.join(physical)}) with stock/C&C. Consider price match/beat at competing stores.")
+            elif not physical or not has_stock:
+                hints_list.append(f"⚠️ LOW CONFIDENCE: {chip} deal lacks physical retailer or stock/C&C signals. Arbitrage risk high—verify availability before stacking.")
+            
+            # Tier-specific hints
+            if tier in ["pro", "max", "ultra"]:
+                hints_list.append(f"Higher-tier chip ({tier.upper()}) detected—premiums typically 20-40% over base. Price match becomes more valuable.")
+            
+            enriched_item["hint"] = " ".join(hints_list)
+        
+        # Filter out LOW confidence Apple deals from main list (they'll be shown separately)
+        if is_apple and confidence == "LOW":
+            enriched_item["excluded_from_main"] = True
+        else:
+            enriched_item["excluded_from_main"] = False
+        
+        enriched.append(enriched_item)
+
+    source_rank = {"FreePoints": 0, "GCDB": 1, "OzBargain": 2}
+    enriched.sort(key=lambda x: (source_rank.get(x["source"], 9), x["title"].lower()))
+
+    # ----- Plain text -----
+    sections = []
+    sections.append(f"Daily Deal Stack Report — {today}")
+    sections.append("Focus keywords: " + ", ".join(KEYWORDS))
+    sections.append("")
+
+    for src in ["FreePoints", "GCDB", "OzBargain", "Costco", "Costco (via OzBargain)"]:
+        src_items = [x for x in enriched if x["source"] == src and not x.get("excluded_from_main")]
+        if not src_items:
+            continue
+        sections.append(f"=== {src} (top {len(src_items)}) ===")
+        for i, x in enumerate(src_items, 1):
+            merch_txt = f" | Merchants: {', '.join(x['merchants'])}" if x.get("merchants") else ""
+            cashback_txt = f" | Cashback: {', '.join(x['cashback'])}" if x.get("cashback") else ""
+            
+            # Add chip info if detected
+            chip_info = x.get("chip_info", {})
+            chip_txt = ""
+            if chip_info.get("chip"):
+                chip = chip_info["chip"]
+                conf = x.get("confidence", "UNKNOWN")
+                chip_txt = f" | Apple Chip: {chip} | Confidence: {conf}"
+            
+            hint_txt = f"\n    Stack hint: {x['hint']}" if x.get("hint") else ""
+            cashback_note_txt = f"\n    {x['cashback_note']}" if x.get("cashback_note") else ""
+            sections.append(f"{i}. {x['title']}{merch_txt}{cashback_txt}{chip_txt}\n    {x['link']}{hint_txt}{cashback_note_txt}")
+        sections.append("")
     
-    html = f"""
-    <div style="margin:20px 0;padding:16px;border:1px solid #ddd;border-radius:8px;background:#fff;">
-      <h2 style="margin:0 0 10px 0;">Daily Deal Stack Report — {today}</h2>
-      <p>(Daily report placeholder)</p>
+    # Show excluded low-confidence Apple deals separately
+    excluded = [x for x in enriched if x.get("excluded_from_main")]
+    if excluded:
+        sections.append("=== ⚠️ Low Confidence Apple Deals (Excluded from Main List) ===")
+        sections.append("These deals lack physical retailer or stock/C&C signals.")
+        sections.append("")
+        for i, x in enumerate(excluded, 1):
+            chip = x.get("chip_info", {}).get("chip", "Unknown")
+            sections.append(f"{i}. {x['title']} | Chip: {chip}\n    {x['link']}")
+        sections.append("")
+
+    sections.append("🔥 OzBargain Trending (Top 10)")
+    sections.append("Hot deals right now (from /hot).")
+    sections.append("")
+    if trending:
+        for i, d in enumerate(trending, 1):
+            sections.append(f"{i}. {d['title']}\n    {d['link']}")
+    else:
+        sections.append("No trending deals found today.")
+    sections.append("")
+
+    sections.append("=== Quick stacking playbook ===")
+    sections.append(
+        "1) Start with points promo on gift cards (e.g., 20x) → base return.\n"
+        "2) Use the correct gift card type at the target merchant (Ultimate/TCN vs Apple-only).\n"
+        "3) If buying online via cashback portal, confirm portal terms allow gift-card/account-balance payments.\n"
+        "4) If portal excludes gift-card payments, you still keep the base points return.\n"
+    )
+
+    plain = "\n".join(sections)
+
+    # ----- HTML -----
+    def esc(s):
+        return html_lib.escape(s or "")
+
+    def card(title, subtitle, inner_html):
+        sub = f"<div style='color:#666;font-size:12px;margin-top:4px;'>{esc(subtitle)}</div>" if subtitle else ""
+        return f"""
+        <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #eee;border-radius:14px;margin:14px 0;background:#fff;">
+          <tr><td style="padding:14px 14px 10px 14px;">
+            <div style="font-size:16px;font-weight:700;">{esc(title)}</div>{sub}
+          </td></tr>
+          <tr><td style="padding:0 10px 12px 10px;">{inner_html}</td></tr>
+        </table>
+        """
+
+    def deal_table(rows_html):
+        if not rows_html:
+            rows_html = "<tr><td style='padding:10px;color:#666;'>No items found.</td></tr>"
+        return f"<table width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse;'>{rows_html}</table>"
+
+    def row(idx, title, link, meta="", hint=""):
+        meta_html = f"<div style='margin-top:4px;color:#555;font-size:12px;'>{esc(meta)}</div>" if meta else ""
+        hint_html = f"<div style='margin-top:6px;color:#333;font-size:12px;'><b>Stack hint:</b> {esc(hint)}</div>" if hint else ""
+        return f"""
+        <tr>
+          <td style="padding:10px 6px;border-top:1px solid #eee;vertical-align:top;width:34px;color:#666;">{idx}.</td>
+          <td style="padding:10px 6px;border-top:1px solid #eee;vertical-align:top;">
+            <div style="font-size:14px;line-height:20px;">
+              <a href="{esc(link)}" style="color:#1155cc;text-decoration:none;">{esc(title)}</a>
+            </div>
+            {meta_html}
+            {hint_html}
+          </td>
+        </tr>
+        """
+
+    html_sections = []
+    kw_preview = ", ".join(KEYWORDS[:10]) + ("…" if len(KEYWORDS) > 10 else "")
+    html_sections.append(f"""
+    <div style="padding:14px 16px;border:1px solid #eee;border-radius:14px;background:#fff;">
+      <div style="font-size:18px;font-weight:800;">Daily Deal Stack Report</div>
+      <div style="margin-top:6px;color:#666;font-size:13px;">{esc(today)}</div>
+      <div style="margin-top:8px;color:#666;font-size:12px;">Keywords: {esc(kw_preview)}</div>
     </div>
-    """
+    """)
+
+    for src in ["FreePoints", "GCDB", "OzBargain", "Costco", "Costco (via OzBargain)"]:
+        src_items = [x for x in enriched if x["source"] == src and not x.get("excluded_from_main")]
+        rows = ""
+        for i, x in enumerate(src_items, 1):
+            meta_parts = []
+            if x.get("merchants"):
+                meta_parts.append("Merchants: " + ", ".join(x["merchants"]))
+            if x.get("cashback"):
+                meta_parts.append("Cashback: " + ", ".join(x["cashback"]))
+            
+            # Add chip info with confidence badge
+            chip_info = x.get("chip_info", {})
+            if chip_info.get("chip"):
+                conf = x.get("confidence", "UNKNOWN")
+                badge_color = {"HIGH": "#28a745", "MEDIUM": "#ffc107", "LOW": "#dc3545"}.get(conf, "#6c757d")
+                meta_parts.append(f"<span style='background:{badge_color};color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:700;'>{conf}</span> Apple Chip: {esc(chip_info['chip'])}")
+            
+            meta = " | ".join(meta_parts)
+            
+            # Build hint with cashback note
+            hint_parts = []
+            if x.get("hint"):
+                hint_parts.append(x["hint"])
+            if x.get("cashback_note"):
+                hint_parts.append(f"<div style='margin-top:6px;padding:6px 8px;background:#fff3cd;border-left:3px solid #ffc107;border-radius:3px;color:#856404;font-size:11px;'>{esc(x['cashback_note'])}</div>")
+            combined_hint = "<br>".join(hint_parts) if hint_parts else x.get("hint", "")
+            
+            rows += row(i, x["title"], x["link"], meta=meta, hint=combined_hint)
+        html_sections.append(card(src, f"Top {len(src_items)} items", deal_table(rows)))
     
-    return plain, html
+    # Show excluded low-confidence Apple deals
+    excluded = [x for x in enriched if x.get("excluded_from_main")]
+    if excluded:
+        rows = ""
+        for i, x in enumerate(excluded, 1):
+            chip = x.get("chip_info", {}).get("chip", "Unknown")
+            meta = f"<span style='background:#dc3545;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:700;'>LOW</span> Apple Chip: {esc(chip)}"
+            rows += row(i, x["title"], x["link"], meta=meta, hint=x.get("hint", ""))
+        html_sections.append(card("⚠️ Low Confidence Apple Deals", "Excluded from main list—lack physical retailer or stock/C&C signals", deal_table(rows)))
+
+    rows = ""
+    for i, d in enumerate(trending[:10], 1):
+        rows += row(i, d["title"], d["link"])
+    html_sections.append(card("🔥 OzBargain Trending", "Hot deals right now (/hot)", deal_table(rows)))
+
+    playbook = """
+    <ol style="margin:10px 0 0 18px;color:#333;font-size:13px;line-height:18px;">
+      <li>Start with points promo on gift cards (e.g., 20x) → base return.</li>
+      <li>Use the correct gift card type at the target merchant (Ultimate/TCN vs Apple-only).</li>
+      <li>If buying online via cashback portal, confirm portal terms allow gift-card/account-balance payments.</li>
+      <li>If portal excludes gift-card payments, you still keep the base points return.</li>
+    </ol>
+    """
+    html_sections.append(card("🧠 Quick stacking playbook", "", playbook))
+
+    html_doc = f"""<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f6f7f9;font-family:Arial,Helvetica,sans-serif;">
+    <div style="max-width:760px;margin:0 auto;padding:18px;">
+      {''.join(html_sections)}
+      <div style="color:#999;font-size:11px;margin-top:10px;">Sent by your Deal Agent.</div>
+    </div>
+  </body>
+</html>"""
+    
+    return plain, html_doc
 
 
 def build_combined_report() -> tuple[str, str]:
@@ -522,9 +847,44 @@ def build_combined_report() -> tuple[str, str]:
     """
     today = dt.datetime.now().strftime("%Y-%m-%d")
     
-    # Build both reports
-    stack_plain, stack_html = build_stack_report()
-    daily_plain, daily_html = build_daily_report()
+    # Build both reports with error handling
+    stack_plain = None
+    stack_html = None
+    stack_error = None
+    try:
+        stack_plain, stack_html = build_stack_report()
+    except Exception as e:
+        stack_error = str(e)
+        stack_plain = f"⚠️ Stack report failed: {stack_error}"
+        stack_html = f"""
+        <div style="margin:20px 0;padding:16px;border:2px solid #dc3545;border-radius:8px;background:#f8d7da;">
+          <h2 style="margin:0 0 10px 0;color:#721c24;">⚠️ Stack Report Failed</h2>
+          <p style="margin:0;color:#721c24;">Error: {html_lib.escape(stack_error)}</p>
+        </div>
+        """
+    
+    daily_plain = None
+    daily_html = None
+    daily_body = None
+    daily_error = None
+    try:
+        daily_plain, daily_html = build_daily_report()
+        # Extract body content from daily HTML (it returns a complete document)
+        import re as re_module
+        daily_body_match = re_module.search(r'<body[^>]*>(.*?)</body>', daily_html, re_module.DOTALL)
+        if daily_body_match:
+            daily_body = daily_body_match.group(1)
+        else:
+            daily_body = daily_html  # fallback if no body tags found
+    except Exception as e:
+        daily_error = str(e)
+        daily_plain = f"⚠️ Daily report failed: {daily_error}"
+        daily_body = f"""
+        <div style="margin:20px 0;padding:16px;border:2px solid #dc3545;border-radius:8px;background:#f8d7da;">
+          <h2 style="margin:0 0 10px 0;color:#721c24;">⚠️ Daily Report Failed</h2>
+          <p style="margin:0;color:#721c24;">Error: {html_lib.escape(daily_error)}</p>
+        </div>
+        """
     
     # Combine plain text
     plain_sections = [
@@ -564,7 +924,7 @@ def build_combined_report() -> tuple[str, str]:
       {stack_html}
       
       <!-- Daily Report Section -->
-      {daily_html}
+      {daily_body}
       
       <!-- Footer -->
       <div style="margin-top:30px;padding:16px;text-align:center;color:#999;font-size:11px;border-top:1px solid #ddd;">
