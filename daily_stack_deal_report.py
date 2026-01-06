@@ -358,28 +358,29 @@ def fetch_ozb():
     return out[:20]
 
 def fetch_costco():
-    """Fetch Costco Hot Buys - checks for Apple products.
+    """Fetch Costco Hot Buys - checks for Apple products only.
     Note: Costco uses JavaScript rendering, so we return a manual check reminder."""
     items = []
     
     # Add manual check reminder
     items.append({
         "source": "Costco",
-        "title": "🔍 Costco Hot Buys - Manual Check Required (Apple Products, Electronics)",
+        "title": "🔍 Costco Hot Buys - Manual Check Required (Apple Products Only)",
         "link": "https://www.costco.com.au/c/hot-buys"
     })
     
-    # Try to search OzBargain for recent Costco deals as backup
+    # Try to search OzBargain for recent Costco Apple deals as backup
     try:
-        html = fetch_url("https://www.ozbargain.com.au/?q=costco")
+        html = fetch_url("https://www.ozbargain.com.au/?q=costco+apple")
         soup = BeautifulSoup(html, "lxml")
-        for a in soup.select("a[href^='/node/']")[:3]:
+        for a in soup.select("a[href^='/node/']")[:5]:
             title = norm(a.get_text(" ", strip=True))
             if not title or "costco" not in title.lower():
                 continue
-            link = "https://www.ozbargain.com.au" + a["href"]
-            # Only include if it matches keywords (Apple, gift cards, etc.)
-            if contains_keywords(title):
+            # Only include Apple products, exclude gift cards
+            title_lower = title.lower()
+            if "apple" in title_lower and "gift" not in title_lower and "giftcard" not in title_lower:
+                link = "https://www.ozbargain.com.au" + a["href"]
                 items.append({"source": "Costco (via OzBargain)", "title": title, "link": link})
     except Exception:
         pass
