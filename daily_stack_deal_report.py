@@ -17,17 +17,18 @@ KEYWORDS = [
 
 MERCHANTS = [
     "Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "Harvey Norman",
-    "Amazon", "Woolworths", "Coles", "IKEA"
+    "Amazon", "Woolworths", "Coles", "IKEA", "Costco"
 ]
 
-PRIORITY_MERCHANTS = ["Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "Harvey Norman", "IKEA"]
+PRIORITY_MERCHANTS = ["Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "Harvey Norman", "IKEA", "Costco"]
 
 PHYSICAL_RETAILERS = {
     "Officeworks": ["JB Hi-Fi", "The Good Guys", "Harvey Norman"],
     "JB Hi-Fi": ["Officeworks", "The Good Guys", "Harvey Norman"],
-    "The Good Guys": ["Officeworks", "JB Hi-Fi", "Harvey Norman"],
+    "The Good Goods": ["Officeworks", "JB Hi-Fi", "Harvey Norman"],
     "Apple": ["Officeworks", "JB Hi-Fi", "The Good Guys", "Harvey Norman"],
     "Harvey Norman": ["Officeworks", "JB Hi-Fi", "The Good Guys"],
+    "Costco": ["Officeworks", "JB Hi-Fi", "The Good Guys", "Harvey Norman"],
 }
 
 STOCK_KEYWORDS = [
@@ -356,10 +357,39 @@ def fetch_ozb():
             })
     return out[:20]
 
+def fetch_costco():
+    """Fetch Costco Hot Buys - checks for Apple products.
+    Note: Costco uses JavaScript rendering, so we return a manual check reminder."""
+    items = []
+    
+    # Add manual check reminder
+    items.append({
+        "source": "Costco",
+        "title": "🔍 Costco Hot Buys - Manual Check Required (Apple Products, Electronics)",
+        "link": "https://www.costco.com.au/c/hot-buys"
+    })
+    
+    # Try to search OzBargain for recent Costco deals as backup
+    try:
+        html = fetch_url("https://www.ozbargain.com.au/?q=costco")
+        soup = BeautifulSoup(html, "lxml")
+        for a in soup.select("a[href^='/node/']")[:3]:
+            title = norm(a.get_text(" ", strip=True))
+            if not title or "costco" not in title.lower():
+                continue
+            link = "https://www.ozbargain.com.au" + a["href"]
+            # Only include if it matches keywords (Apple, gift cards, etc.)
+            if contains_keywords(title):
+                items.append({"source": "Costco (via OzBargain)", "title": title, "link": link})
+    except Exception:
+        pass
+    
+    return items
+
 # ---------- REPORT ----------
 def build_reports():
     today = dt.date.today().isoformat()
-    raw = fetch_freepoints() + fetch_gcdb() + fetch_ozb()
+    raw = fetch_freepoints() + fetch_gcdb() + fetch_ozb() + fetch_costco()
 
     enriched = []
     for it in raw:

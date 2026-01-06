@@ -22,11 +22,11 @@ KEYWORDS = [
 ]
 
 MERCHANTS = [
-    "Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "Harvey Norman", "Amazon", "Woolworths", "Coles"
+    "Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "Harvey Norman", "Amazon", "Woolworths", "Coles", "Costco"
 ]
 
 PHYSICAL_RETAILERS = [
-    "Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "Harvey Norman", "Bing Lee"
+    "Officeworks", "JB Hi-Fi", "The Good Guys", "Apple", "Harvey Norman", "Bing Lee", "Costco"
 ]
 
 STOCK_KEYWORDS = [
@@ -261,6 +261,35 @@ def fetch_ozbargain_frontpage(limit: int = 20) -> list[dict]:
             break
     return out
 
+def fetch_costco_hotbuys() -> list[dict]:
+    """Fetch Costco Hot Buys - checks for Apple products.
+    Note: Costco uses JavaScript rendering, so we return a manual check reminder."""
+    items = []
+    
+    # Add manual check reminder
+    items.append({
+        "source": "Costco",
+        "title": "🔍 Costco Hot Buys - Manual Check Required (Apple Products, Electronics)",
+        "link": "https://www.costco.com.au/c/hot-buys"
+    })
+    
+    # Try to search OzBargain for recent Costco deals as backup
+    try:
+        html = fetch_url("https://www.ozbargain.com.au/?q=costco")
+        soup = BeautifulSoup(html, "lxml")
+        for a in soup.select("a[href^='/node/']")[:3]:
+            title = norm(a.get_text(" ", strip=True))
+            if not title or "costco" not in title.lower():
+                continue
+            link = "https://www.ozbargain.com.au" + a["href"]
+            # Only include if it matches keywords (Apple, gift cards, etc.)
+            if contains_keywords(title):
+                items.append({"source": "Costco (via OzBargain)", "title": title, "link": link})
+    except Exception:
+        pass
+    
+    return items
+
 
 # ---------- REPORT ----------
 def build_reports() -> tuple[str, str]:
@@ -272,6 +301,7 @@ def build_reports() -> tuple[str, str]:
     all_items += fetch_freepoints_latest(10)
     all_items += fetch_gcdb_latest(10)
     all_items += fetch_ozbargain_frontpage(20)
+    all_items += fetch_costco_hotbuys()
 
     enriched: list[dict] = []
     for it in all_items:
@@ -337,7 +367,7 @@ def build_reports() -> tuple[str, str]:
     sections.append("Focus keywords: " + ", ".join(KEYWORDS))
     sections.append("")
 
-    for src in ["FreePoints", "GCDB", "OzBargain"]:
+    for src in ["FreePoints", "GCDB", "OzBargain", "Costco", "Costco (via OzBargain)"]:
         src_items = [x for x in enriched if x["source"] == src and not x.get("excluded_from_main")]
         if not src_items:
             continue
@@ -436,7 +466,7 @@ def build_reports() -> tuple[str, str]:
     </div>
     """)
 
-    for src in ["FreePoints", "GCDB", "OzBargain"]:
+    for src in ["FreePoints", "GCDB", "OzBargain", "Costco", "Costco (via OzBargain)"]:
         src_items = [x for x in enriched if x["source"] == src and not x.get("excluded_from_main")]
         rows = ""
         for i, x in enumerate(src_items, 1):
