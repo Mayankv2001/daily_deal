@@ -4,6 +4,7 @@ import re
 import ssl
 import sys
 import smtplib
+import argparse
 import datetime as dt
 from email.message import EmailMessage
 import html as html_lib
@@ -149,7 +150,7 @@ def calculate_arbitrage(item):
     confidence = "none"
     if targets:
         # High confidence: physical retailer + stock signal + (Apple chip OR priority merchant)
-        if has_stock and (chip_info.get("chip") or any(m in PRIORITY_MERCHANTS for m in physical)):
+        if has_stock and (chip_info.get("chip") or any(m in PRIORITY_MERCHANTS for m in item.get("merchants", []))):
             confidence = "high"
         # Medium confidence: physical retailer + stock signal
         elif has_stock:
@@ -264,7 +265,7 @@ def why_stack_works(it):
     
     # Apple chip forward-compatibility for price matching
     chip_info = it.get("chip_info", {})
-    if chip_info.get("chip") and chip_info.get("generation", 0) >= LATEST_KNOWN_GENERATION:
+    if chip_info.get("chip") and chip_info.get("generation", 0) > LATEST_KNOWN_GENERATION:
         reasons.append("Apple silicon generations are forward-compatible for price matching when model/SKU aligns.")
     
     # Apple chip with stock signal - specific price match hint
@@ -491,6 +492,60 @@ def calculate_confidence(item):
     
     return "LOW"
 
+
+def deduplicate_items(items: list[dict]) -> list[dict]:
+    """
+    Remove duplicate deals based on normalized title OR link.
+    Keep the item with higher score (or first if no score).
+    """
+    seen_by_title = {}  # normalized_title -> item
+    seen_by_link = {}   # link -> item
+    result = []
+    
+    for item in items:
+        title_key = norm(item.get("title", "")).lower()
+        link_key = item.get("link", "")
+        
+        # Check if we've seen this title or link before
+        existing = None
+        if title_key and title_key in seen_by_title:
+            existing = seen_by_title[title_key]
+        elif link_key and link_key in seen_by_link:
+            existing = seen_by_link[link_key]
+        
+        if existing is None:
+            # New item - add it
+            result.append(item)
+            if title_key:
+                seen_by_title[title_key] = item
+            if link_key:
+                seen_by_link[link_key] = item
+        else:
+            # Duplicate found - compare scores
+            current_score = item.get("score", 0)
+            existing_score = existing.get("score", 0)
+            
+            if current_score > existing_score:
+                # Replace with higher scoring item
+                result.remove(existing)
+                result.append(item)
+                
+                # Update tracking dicts
+                old_title = norm(existing.get("title", "")).lower()
+                old_link = existing.get("link", "")
+                if old_title in seen_by_title:
+                    del seen_by_title[old_title]
+                if old_link in seen_by_link:
+                    del seen_by_link[old_link]
+                
+                if title_key:
+                    seen_by_title[title_key] = item
+                if link_key:
+                    seen_by_link[link_key] = item
+    
+    return result
+
+
 # ---------- STACK REPORT ----------
 def build_stack_report() -> tuple[str, str]:
     """
@@ -511,9 +566,35 @@ def build_stack_report() -> tuple[str, str]:
         it["why"] = why_stack_works(it)
         it["recipe"] = generate_stack_recipe(it)
         it["score"] = score_item(it)
+        
+        # Exclude Apple chip deals from Top 5 if they lack both physical retailer AND stock signal
+        title = it.get("title", "")
+        chip_info = it["chip_info"]
+        if chip_info.get("chip") is not None:
+            physical = detect_physical_retailers(title)
+            has_stock = detect_stock_signal(title)
+            if not (physical and has_stock):
+                it["exclude_from_top"] = True
+                it["exclude_reason"] = "Apple chip detected but no physical retailer/stock signal"
+            else:
+                it["exclude_from_top"] = False
+                it["exclude_reason"] = None
+        else:
+            it["exclude_from_top"] = False
+            it["exclude_reason"] = None
+        
         enriched.append(it)
 
-    best = sorted(enriched, key=lambda x: x.get("score", 0), reverse=True)[:5]
+    # Deduplicate before selecting Top 5
+    enriched = deduplicate_items(enriched)
+
+    # Filter out excluded items before selecting Top 5
+    best_pool = [x for x in enriched if not x.get("exclude_from_top", False)]
+    if best_pool:
+        best = sorted(best_pool, key=lambda x: x.get("score", 0), reverse=True)[:5]
+    else:
+        # Fallback: use all enriched items if best_pool is empty
+        best = sorted(enriched, key=lambda x: x.get("score", 0), reverse=True)[:5]
 
     # ----- PLAIN TEXT -----
     lines = [f"🏆 Best Stacks Today — {today}", ""]
@@ -533,6 +614,19 @@ def build_stack_report() -> tuple[str, str]:
             for step_num, step in enumerate(x["recipe"], 1):
                 lines.append(f"      {step_num}. {step}")
         lines.append("")
+    
+    # Show excluded Apple chip deals
+    excluded_items = [x for x in enriched if x.get("exclude_from_top", False)]
+    if excluded_items:
+        lines.append("=== ⚠️ Excluded Apple Chip Deals ===")
+        lines.append("These were excluded from Top 5:")
+        lines.append("")
+        for i, x in enumerate(excluded_items, 1):
+            reason = x.get("exclude_reason", "Unknown reason")
+            lines.append(f"{i}. {x['title']}")
+            lines.append(f"   {x['link']}")
+            lines.append(f"   Reason: {reason}")
+            lines.append("")
 
     plain = "\n".join(lines)
 
@@ -581,6 +675,23 @@ def build_stack_report() -> tuple[str, str]:
           </td>
         </tr>
         """
+    
+    # Add excluded Apple chip deals section
+    excluded_items = [x for x in enriched if x.get("exclude_from_top", False)]
+    excluded_html = ""
+    if excluded_items:
+        excluded_rows = ""
+        for i, x in enumerate(excluded_items, 1):
+            reason = esc(x.get("exclude_reason", "Unknown reason"))
+            excluded_rows += f"<div style='margin:4px 0;font-size:12px;'>{i}. <a href='{esc(x.get('link',''))}' style='color:#1155cc;text-decoration:none;'>{esc(x.get('title',''))}</a> — <span style='color:#666;'>{reason}</span></div>"
+        
+        excluded_html = f"""
+        <div style="margin:10px 0;padding:12px;border:1px solid #ffc107;border-radius:6px;background:#fff8e1;">
+          <h3 style="margin:0 0 8px 0;color:#856404;font-size:14px;">⚠️ Excluded Apple Chip Deals</h3>
+          <div style="color:#666;font-size:11px;margin-bottom:6px;">These were excluded from Top 5:</div>
+          {excluded_rows}
+        </div>
+        """
 
     html = f"""
     <div style="margin:20px 0;padding:16px;border:2px solid #4a90e2;border-radius:8px;background:#f0f8ff;">
@@ -588,6 +699,7 @@ def build_stack_report() -> tuple[str, str]:
       <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fff;border-radius:6px;">
         {rows}
       </table>
+      {excluded_html}
     </div>
     """
     
@@ -663,6 +775,9 @@ def build_daily_report() -> tuple[str, str]:
             enriched_item["excluded_from_main"] = False
         
         enriched.append(enriched_item)
+
+    # Deduplicate across all sources
+    enriched = deduplicate_items(enriched)
 
     source_rank = {"FreePoints": 0, "GCDB": 1, "OzBargain": 2}
     enriched.sort(key=lambda x: (source_rank.get(x["source"], 9), x["title"].lower()))
@@ -827,17 +942,13 @@ def build_daily_report() -> tuple[str, str]:
     """
     html_sections.append(card("🧠 Quick stacking playbook", "", playbook))
 
-    html_doc = f"""<!doctype html>
-<html>
-  <body style="margin:0;padding:0;background:#f6f7f9;font-family:Arial,Helvetica,sans-serif;">
-    <div style="max-width:760px;margin:0 auto;padding:18px;">
+    html_fragment = f"""
+    <div style="margin:20px 0;padding:16px;border:1px solid #ddd;border-radius:8px;background:#fff;">
       {''.join(html_sections)}
-      <div style="color:#999;font-size:11px;margin-top:10px;">Sent by your Deal Agent.</div>
     </div>
-  </body>
-</html>"""
+    """
     
-    return plain, html_doc
+    return plain, html_fragment
 
 
 def build_combined_report() -> tuple[str, str]:
@@ -865,21 +976,13 @@ def build_combined_report() -> tuple[str, str]:
     
     daily_plain = None
     daily_html = None
-    daily_body = None
     daily_error = None
     try:
         daily_plain, daily_html = build_daily_report()
-        # Extract body content from daily HTML (it returns a complete document)
-        import re as re_module
-        daily_body_match = re_module.search(r'<body[^>]*>(.*?)</body>', daily_html, re_module.DOTALL)
-        if daily_body_match:
-            daily_body = daily_body_match.group(1)
-        else:
-            daily_body = daily_html  # fallback if no body tags found
     except Exception as e:
         daily_error = str(e)
         daily_plain = f"⚠️ Daily report failed: {daily_error}"
-        daily_body = f"""
+        daily_html = f"""
         <div style="margin:20px 0;padding:16px;border:2px solid #dc3545;border-radius:8px;background:#f8d7da;">
           <h2 style="margin:0 0 10px 0;color:#721c24;">⚠️ Daily Report Failed</h2>
           <p style="margin:0;color:#721c24;">Error: {html_lib.escape(daily_error)}</p>
@@ -918,13 +1021,24 @@ def build_combined_report() -> tuple[str, str]:
       <div style="text-align:center;padding:20px;background:#fff;border:1px solid #ddd;border-radius:8px;margin-bottom:20px;">
         <h1 style="margin:0;color:#333;">Combined Deal Report</h1>
         <p style="margin:8px 0 0 0;color:#666;">{today}</p>
+        <div style="margin-top:12px;">
+          <a href="#stack-report" style="color:#4a90e2;text-decoration:none;margin:0 8px;font-size:13px;">Top 5 Stacks</a>
+          <span style="color:#ddd;">|</span>
+          <a href="#daily-report" style="color:#4a90e2;text-decoration:none;margin:0 8px;font-size:13px;">Full Feed</a>
+        </div>
       </div>
       
       <!-- Stack Report Section -->
-      {stack_html}
+      <div id="stack-report" style="margin-bottom:30px;">
+        <h2 style="margin:0 0 15px 0;padding-bottom:10px;border-bottom:2px solid #4a90e2;color:#2c5aa0;font-size:20px;">📊 Top 5 Stack Report</h2>
+        {stack_html}
+      </div>
       
       <!-- Daily Report Section -->
-      {daily_body}
+      <div id="daily-report" style="margin-bottom:30px;">
+        <h2 style="margin:0 0 15px 0;padding-bottom:10px;border-bottom:2px solid #4a90e2;color:#2c5aa0;font-size:20px;">📰 Full Daily Deal Feed</h2>
+        {daily_html}
+      </div>
       
       <!-- Footer -->
       <div style="margin-top:30px;padding:16px;text-align:center;color:#999;font-size:11px;border-top:1px solid #ddd;">
@@ -978,16 +1092,50 @@ def send_email(subject: str, body: str, html_body: str | None = None):
 
 
 def main():
-    """Main entry point."""
-    plain, html = build_combined_report()
-    subject = "Combined Daily Deal Report"
-
-    if "--print" in sys.argv:
+    """Main entry point with CLI argument support."""
+    parser = argparse.ArgumentParser(description="Daily Deal Report Generator")
+    parser.add_argument(
+        "--print",
+        action="store_true",
+        help="Print report to stdout instead of sending email"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["stack", "daily", "combined"],
+        default="combined",
+        help="Report mode: stack (Top 5), daily (Full Feed), or combined (both)"
+    )
+    parser.add_argument(
+        "--no-email",
+        action="store_true",
+        help="Skip email sending (useful with --print)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Build the requested report
+    if args.mode == "stack":
+        plain, html = build_stack_report()
+        subject = "Top 5 Stack Report"
+    elif args.mode == "daily":
+        plain, html = build_daily_report()
+        subject = "Daily Deal Feed"
+    else:  # combined
+        plain, html = build_combined_report()
+        subject = "Combined Daily Deal Report"
+    
+    # Output handling
+    if args.print:
         print(plain)
         return
-
+    
+    if args.no_email:
+        print(f"✅ Generated {args.mode} report (email sending skipped)")
+        return
+    
+    # Send email
     send_email(subject, plain, html)
-    print("✅ Sent combined report email.")
+    print(f"✅ Sent {args.mode} report email.")
 
 
 if __name__ == "__main__":
