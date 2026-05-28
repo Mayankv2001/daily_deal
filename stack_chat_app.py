@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from stack_agent import StackAgent
+from stack_agent.ai_agent import AIStackAgent
 
 
-app = FastAPI(title="AI Deal-Stacking Agent", version="0.1.0")
+app = FastAPI(title="AI Deal-Stacking Agent", version="0.2.0")
 agent = StackAgent()
+_ai_agent: AIStackAgent | None = None
+
+
+def _get_ai_agent() -> AIStackAgent:
+    global _ai_agent
+    if _ai_agent is None:
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise HTTPException(
+                status_code=503,
+                detail="OPENAI_API_KEY not configured on server. Export it before starting uvicorn.",
+            )
+        _ai_agent = AIStackAgent()
+    return _ai_agent
 
 
 class StackSearchRequest(BaseModel):
@@ -21,9 +36,14 @@ class StackSearchRequest(BaseModel):
     max_results: int = Field(default=5, ge=1, le=10)
 
 
+class AISearchRequest(BaseModel):
+    query: str = Field(default="")
+    url: str | None = Field(default=None)
+
+
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    return {"status": "ok", "ai_enabled": bool(os.environ.get("OPENAI_API_KEY"))}
 
 
 @app.post("/api/stack-search")
@@ -33,6 +53,23 @@ def stack_search(payload: StackSearchRequest) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result.to_dict()
+
+
+@app.post("/api/ai-stack-search")
+def ai_stack_search(payload: AISearchRequest) -> StreamingResponse:
+    if not (payload.query or payload.url):
+        raise HTTPException(status_code=400, detail="query or url is required")
+    ai = _get_ai_agent()
+
+    def event_stream():
+        try:
+            for event in ai.run_stream(payload.query, url=payload.url):
+                yield event.to_sse()
+        except Exception as exc:  # noqa: BLE001
+            import json as _json
+            yield f"data: {_json.dumps({'type': 'error', 'data': str(exc)})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -249,6 +286,13 @@ HTML = """<!doctype html>
           </div>
           <button id="submit" type="submit">Search</button>
         </div>
+        <div class="field" style="margin-top:10px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:650">
+            <input id="ai-mode" type="checkbox">
+            AI Live Search (GPT + web_search)
+          </label>
+          <div class="meta" style="margin-top:4px">Uses OpenAI to call scrapers + live web search across Cashrewards, Prezzee, retailer pages, then synthesises the best stack.</div>
+        </div>
       </form>
       <div class="results" id="results">
         <div class="empty">Search a product to see stack routes, effective savings, risk, and source links.</div>
@@ -264,14 +308,27 @@ HTML = """<!doctype html>
       event.preventDefault();
       button.disabled = true;
       button.textContent = "Searching";
-      results.innerHTML = '<div class="empty">Checking live deal, gift card, points, and cashback sources...</div>';
 
+      const query = document.querySelector("#query").value.trim();
+      const url = document.querySelector("#url").value.trim() || null;
+      const aiMode = document.querySelector("#ai-mode").checked;
+
+      if (aiMode) {
+        await runAi(query, url);
+      } else {
+        await runClassic(query, url);
+      }
+      button.disabled = false;
+      button.textContent = "Search";
+    });
+
+    async function runClassic(query, url) {
+      results.innerHTML = '<div class="empty">Checking live deal, gift card, points, and cashback sources...</div>';
       const payload = {
-        query: document.querySelector("#query").value.trim(),
-        url: document.querySelector("#url").value.trim() || null,
+        query,
+        url,
         max_results: Number(document.querySelector("#max-results").value || 5)
       };
-
       try {
         const response = await fetch("/api/stack-search", {
           method: "POST",
@@ -283,11 +340,72 @@ HTML = """<!doctype html>
         render(data);
       } catch (error) {
         results.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
-      } finally {
-        button.disabled = false;
-        button.textContent = "Search";
       }
-    });
+    }
+
+    async function runAi(query, url) {
+      results.innerHTML = `
+        <article class="rec">
+          <div class="section-title">Agent activity</div>
+          <ul id="ai-log" style="font-size:13px;color:var(--muted)"></ul>
+          <div class="section-title">Answer</div>
+          <div id="ai-answer" style="white-space:pre-wrap;line-height:22px"></div>
+        </article>`;
+      const log = document.querySelector("#ai-log");
+      const answer = document.querySelector("#ai-answer");
+
+      try {
+        const response = await fetch("/api/ai-stack-search", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({query, url})
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${response.status}`);
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const {value, done} = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, {stream: true});
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop();
+          for (const chunk of chunks) {
+            if (!chunk.startsWith("data:")) continue;
+            const json = chunk.slice(5).trim();
+            if (!json) continue;
+            let event;
+            try { event = JSON.parse(json); } catch { continue; }
+            handleAiEvent(event, log, answer);
+          }
+        }
+      } catch (error) {
+        results.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function handleAiEvent(event, log, answer) {
+      const li = document.createElement("li");
+      if (event.type === "status") {
+        li.textContent = "· " + event.data;
+        log.appendChild(li);
+      } else if (event.type === "tool_call") {
+        const args = event.data.args ? JSON.stringify(event.data.args) : "";
+        li.innerHTML = `→ <strong>${escapeHtml(event.data.name)}</strong> ${escapeHtml(args)}`;
+        log.appendChild(li);
+      } else if (event.type === "tool_result") {
+        li.innerHTML = `← <strong>${escapeHtml(event.data.name)}</strong>: ${escapeHtml(String(event.data.preview))}`;
+        log.appendChild(li);
+      } else if (event.type === "final") {
+        answer.textContent = event.data;
+      } else if (event.type === "error") {
+        li.innerHTML = `<span style="color:var(--risk)">× ${escapeHtml(event.data)}</span>`;
+        log.appendChild(li);
+      }
+    }
 
     function render(data) {
       const errors = (data.source_errors || []).map(error => `<div class="error">${escapeHtml(error)}</div>`).join("");

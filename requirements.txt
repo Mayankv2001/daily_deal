@@ -4,3 +4,4 @@ lxml
 fastapi
 uvicorn
 httpx
+openai>=1.40.0
