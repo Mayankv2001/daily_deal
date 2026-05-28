@@ -52,3 +52,21 @@ python3 daily_combined_report.py --mode stack --print
 ```bash
 python3 daily_combined_report.py --no-email
 ```
+
+## AI Deal-Stacking Chatbot
+
+Run the FastAPI chatbot/API locally:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/uvicorn stack_chat_app:app --reload --port 8000
+```
+
+Open `http://127.0.0.1:8000/`, or call the API directly:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/stack-search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"MacBook Air M4","max_results":5}'
+```
