@@ -210,7 +210,7 @@ python daily_stack_deal_report.py --print | grep -i "harvey"
 Should see "Consider Harvey Norman / JB Hi-Fi / Officeworks price match/beat" in arbitrage hints.
 
 ### Test Cashback Warnings
-Look for deals mentioning ShopBack/TopCashback/Cashrewards:
+Look for deals mentioning ShopBack/TopCashback:
 ```bash
 python daily_deal_report.py --print | grep -i "shopback"
 ```
@@ -235,4 +235,3 @@ Should see yellow warning: "⚠️ ShopBack typically excludes gift card purchas
 3. **Adjust keywords** in scripts to match your interests
 4. **Tune scoring weights** to prioritize your preferred stack types
 5. **Enable GitHub Actions** for hands-off daily emails
-

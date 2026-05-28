@@ -66,8 +66,6 @@ def detect_cashback(text):
         found.append("ShopBack")
     if "topcashback" in t:
         found.append("TopCashback")
-    if "cashrewards" in t:
-        found.append("Cashrewards")
     if "cashback" in t and not found:
         found.append("Cashback")
     return found

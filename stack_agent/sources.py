@@ -185,7 +185,6 @@ class SourceClient:
         urls = [
             ("ShopBack", f"https://www.shopback.com.au/search?keyword={quote_plus(search_term)}"),
             ("TopCashback", f"https://www.topcashback.com.au/search/merchants/?s={quote_plus(search_term)}"),
-            ("Cashrewards", f"https://www.cashrewards.com.au/search?query={quote_plus(search_term)}"),
         ]
         items: list[SourceItem] = []
         for portal, url in urls:
@@ -293,7 +292,7 @@ def _looks_like_cashback_signal(text: str, query: str, retailer: str | None) -> 
     lower = text.lower()
     if retailer and retailer.lower() in lower:
         return True
-    if text_matches_query(text, query) and any(term in lower for term in ["cashback", "%", "shopback", "topcashback", "cashrewards"]):
+    if text_matches_query(text, query) and any(term in lower for term in ["cashback", "%", "shopback", "topcashback"]):
         return True
     return False
 
@@ -309,8 +308,6 @@ def _source_name_from_domain(domain: str) -> str:
         return "ShopBack"
     if "topcashback.com.au" in domain:
         return "TopCashback"
-    if "cashrewards.com.au" in domain:
-        return "Cashrewards"
     return domain or "Input URL"
 
 

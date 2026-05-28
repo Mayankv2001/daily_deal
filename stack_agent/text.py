@@ -203,8 +203,6 @@ def detect_cashback_portals(text: str) -> list[str]:
         found.append("ShopBack")
     if "topcashback" in haystack or "top cashback" in haystack:
         found.append("TopCashback")
-    if "cashrewards" in haystack or "cash rewards" in haystack:
-        found.append("Cashrewards")
     if "cashback" in haystack and not found:
         found.append("Cashback")
     return found
